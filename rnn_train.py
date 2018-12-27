@@ -16,12 +16,20 @@
 import tensorflow as tf
 from tensorflow.contrib import layers
 from tensorflow.contrib import rnn  # rnn stuff temporarily in contrib, moving back to code in TF 1.1
-import os
+from tensorflow.contrib import tpu
+import sys, os
+import re
 import time
 import math
 import numpy as np
 import my_txtutils as txt
+
+from common import TRAINING_DATA_DIR, MODEL_CHECKPOINTS_DIR, MODEL_LOG_TRAIN_DIR, MODEL_LOG_EVAL_DIR
+
 tf.set_random_seed(0)
+
+TRAINING_RUN_NUMBER = 1
+NUMBER_OF_EPOCHS = 10
 
 # model parameters
 #
@@ -46,9 +54,12 @@ learning_rate = 0.001  # fixed learning rate
 dropout_pkeep = 0.8    # some dropout
 
 # load data, either shakespeare, or the Python source of Tensorflow itself
-shakedir = "shakespeare/*.txt"
+# shakedir = "shakespeare/*.txt"
+datadir = TRAINING_DATA_DIR
 #shakedir = "../tensorflow/**/*.py"
-codetext, valitext, bookranges = txt.read_data_files(shakedir, validation=True)
+# checkpoint_dir = os.path.join(os.getcwd(), 'checkpoints/')
+checkpoint_dir = MODEL_CHECKPOINTS_DIR
+codetext, valitext, bookranges = txt.read_data_files(datadir, validation=True)
 
 # display some stats on the data
 epoch_size = len(codetext) // (BATCHSIZE * SEQLEN)
@@ -60,6 +71,7 @@ txt.print_data_stats(len(codetext), len(valitext), epoch_size)
 lr = tf.placeholder(tf.float32, name='lr')  # learning rate
 pkeep = tf.placeholder(tf.float32, name='pkeep')  # dropout parameter
 batchsize = tf.placeholder(tf.int32, name='batchsize')
+# var_step = tf.Variable(initial_value=0, name="step", dtype=tf.int32, trainable=False)
 
 # inputs
 X = tf.placeholder(tf.uint8, [None, None], name='X')    # [ BATCHSIZE, SEQLEN ]
@@ -113,13 +125,15 @@ summaries = tf.summary.merge([loss_summary, acc_summary])
 # folder at each run named 'log/<timestamp>/'. Two sets of data are saved so that
 # you can compare training and validation curves visually in Tensorboard.
 timestamp = str(math.trunc(time.time()))
-summary_writer = tf.summary.FileWriter("log/" + timestamp + "-training")
-validation_writer = tf.summary.FileWriter("log/" + timestamp + "-validation")
+# summary_writer = tf.summary.FileWriter("log/" + timestamp + "-training")
+# validation_writer = tf.summary.FileWriter("log/" + timestamp + "-validation")
+summary_writer = tf.summary.FileWriter(MODEL_LOG_TRAIN_DIR)
+validation_writer = tf.summary.FileWriter(MODEL_LOG_EVAL_DIR)
 
-# Init for saving models. They will be saved into a directory named 'checkpoints'.
-# Only the last checkpoint is kept.
-if not os.path.exists("checkpoints"):
-    os.mkdir("checkpoints")
+# # Init for saving models. They will be saved into a directory named 'checkpoints'.
+# # Only the last checkpoint is kept.
+# if not os.path.exists(checkpoint_dir):
+#     os.mkdir(checkpoint_dir)
 saver = tf.train.Saver(max_to_keep=1000)
 
 # for display: init the progress bar
@@ -129,20 +143,42 @@ progress = txt.Progress(DISPLAY_FREQ, size=111+2, msg="Training on next "+str(DI
 
 # init
 istate = np.zeros([BATCHSIZE, INTERNALSIZE*NLAYERS])  # initial zero input state
-init = tf.global_variables_initializer()
-sess = tf.Session()
-sess.run(init)
-step = 0
+
+tf.logging.set_verbosity(tf.logging.DEBUG)
+tpu_grpc_url = tf.contrib.cluster_resolver.TPUClusterResolver(
+    tpu=[os.environ['TPU_NAME']]).get_master()
+sess = tf.Session(tpu_grpc_url)
+sess.run(tf.global_variables_initializer())
+sess.run(tpu.initialize_system())
+
+_increment = (BATCHSIZE * SEQLEN)
+_run_increment = (50 * (TRAINING_RUN_NUMBER - 1)) * NUMBER_OF_EPOCHS
+
+step = (_increment * _run_increment) + _increment # next step
+
+checkpoint = tf.train.get_checkpoint_state(checkpoint_dir)
+
+if checkpoint and checkpoint.model_checkpoint_path:
+    regex = r".*?-(?P<step>\d+)$"
+    chk_matches = re.match(regex, checkpoint.model_checkpoint_path)
+    if chk_matches:
+        step = int(chk_matches.group('step')) + 1
+    saver.restore(sess, checkpoint.model_checkpoint_path)
+    print ("Successfully loaded:", checkpoint.model_checkpoint_path)
 
 # training loop
-for x, y_, epoch in txt.rnn_minibatch_sequencer(codetext, BATCHSIZE, SEQLEN, nb_epochs=10):
+for x, y_, epoch in txt.rnn_minibatch_sequencer(codetext, BATCHSIZE, SEQLEN, nb_epochs=NUMBER_OF_EPOCHS):
+# for x, y_, epoch in []:
+    # print('_50_BATCHES {} step {}'.format(_50_BATCHES, step))
+    # print('step {} -- (step // 1000) % 12 = {}'.format(step, (step // 1000) % 12))
 
     # train on one minibatch
     feed_dict = {X: x, Y_: y_, Hin: istate, lr: learning_rate, pkeep: dropout_pkeep, batchsize: BATCHSIZE}
     _, y, ostate = sess.run([train_step, Y, H], feed_dict=feed_dict)
 
     # log training data for Tensorboard display a mini-batch of sequences (every 50 batches)
-    if step % _50_BATCHES == 0:
+    # if step % _50_BATCHES == 0:
+    if (step // 1000) % (6 * 2) == 0:
         feed_dict = {X: x, Y_: y_, Hin: istate, pkeep: 1.0, batchsize: BATCHSIZE}  # no dropout for validation
         y, l, bl, acc, smm = sess.run([Y, seqloss, batchloss, accuracy, summaries], feed_dict=feed_dict)
         txt.print_learning_learned_comparison(x, y, l, bookranges, bl, acc, epoch_size, step, epoch)
@@ -152,7 +188,8 @@ for x, y_, epoch in txt.rnn_minibatch_sequencer(codetext, BATCHSIZE, SEQLEN, nb_
     # The validation text should be a single sequence but that's too slow (1s per 1024 chars!),
     # so we cut it up and batch the pieces (slightly inaccurate)
     # tested: validating with 5K sequences instead of 1K is only slightly more accurate, but a lot slower.
-    if step % _50_BATCHES == 0 and len(valitext) > 0:
+    # if step % _50_BATCHES == 0 and len(valitext) > 0:
+    if (step // 1000) % (6 * 8) == 0 and len(valitext) > 0:
         VALI_SEQLEN = 1*1024  # Sequence length for validation. State will be wrong at the start of each sequence.
         bsize = len(valitext) // VALI_SEQLEN
         txt.print_validation_header(len(codetext), bookranges)
@@ -166,7 +203,8 @@ for x, y_, epoch in txt.rnn_minibatch_sequencer(codetext, BATCHSIZE, SEQLEN, nb_
         validation_writer.add_summary(smm, step)
 
     # display a short text generated with the current weights and biases (every 150 batches)
-    if step // 3 % _50_BATCHES == 0:
+    # if step // 3 % _50_BATCHES == 0:
+    if (step // 1000) % (6 * 4) == 0:
         txt.print_text_generation_header()
         ry = np.array([[txt.convert_from_alphabet(ord("K"))]])
         rh = np.zeros([1, INTERNALSIZE * NLAYERS])
@@ -178,8 +216,10 @@ for x, y_, epoch in txt.rnn_minibatch_sequencer(codetext, BATCHSIZE, SEQLEN, nb_
         txt.print_text_generation_footer()
 
     # save a checkpoint (every 500 batches)
-    if step // 10 % _50_BATCHES == 0:
-        saved_file = saver.save(sess, 'checkpoints/rnn_train_' + timestamp, global_step=step)
+    # if step // 10 % _50_BATCHES == 0:
+    if (step // 1000) % (6 * 8) == 0:
+        # saved_file = saver.save(sess, 'checkpoints/rnn_train_' + timestamp, global_step=step)
+        saved_file = saver.save(sess, '{}rnn_train'.format(MODEL_CHECKPOINTS_DIR), global_step=step)
         print("Saved file: " + saved_file)
 
     # display progress bar
@@ -188,6 +228,7 @@ for x, y_, epoch in txt.rnn_minibatch_sequencer(codetext, BATCHSIZE, SEQLEN, nb_
     # loop state around
     istate = ostate
     step += BATCHSIZE * SEQLEN
+    # var_step.assign_add(tf.constant(BATCHSIZE * SEQLEN))
 
 # all runs: SEQLEN = 30, BATCHSIZE = 100, ALPHASIZE = 98, INTERNALSIZE = 512, NLAYERS = 3
 # run 1477669632 decaying learning rate 0.001-0.0001-1e7 dropout 0.5: not good

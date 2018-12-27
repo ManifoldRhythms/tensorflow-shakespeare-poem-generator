@@ -14,8 +14,8 @@
 # limitations under the License.
 
 import numpy as np
-import glob
-import sys
+import sys, os
+import tensorflow as tf
 
 # size of the alphabet that we work with
 ALPHASIZE = 98
@@ -156,7 +156,7 @@ def print_learning_learned_comparison(X, Y, losses, bookranges, batch_loss, batc
         epoch_string = "{:4d}".format(index) + " (epoch {}) ".format(epoch)
         loss_string = "loss: {:.5f}".format(losses[k])
         print_string = epoch_string + formatted_bookname + " │ {} │ {} │ {}"
-        print(print_string.format(decx, decy, loss_string))
+        # print(print_string.format(decx, decy, loss_string))
         index += sequence_len
     # box formatting characters:
     # │ \u2502
@@ -172,7 +172,7 @@ def print_learning_learned_comparison(X, Y, losses, bookranges, batch_loss, batc
     format_string += "┴{:─^" + str(len(decy) + 2) + "}"
     format_string += "┴{:─^" + str(len(loss_string)) + "}┘"
     footer = format_string.format('INDEX', 'BOOK NAME', 'TRAINING SEQUENCE', 'PREDICTED SEQUENCE', 'LOSS')
-    print(footer)
+    # print(footer)
     # print statistics
     batch_index = start_index_in_epoch // (batch_size * sequence_len)
     batch_string = "batch {}/{} in epoch {},".format(batch_index, epoch_size, epoch)
@@ -244,15 +244,17 @@ def read_data_files(directory, validation=True):
     """
     codetext = []
     bookranges = []
-    shakelist = glob.glob(directory, recursive=True)
+    shakelist = tf.gfile.ListDirectory(directory)
+
     for shakefile in shakelist:
-        shaketext = open(shakefile, "r")
-        print("Loading file " + shakefile)
-        start = len(codetext)
-        codetext.extend(encode_text(shaketext.read()))
-        end = len(codetext)
-        bookranges.append({"start": start, "end": end, "name": shakefile.rsplit("/", 1)[-1]})
-        shaketext.close()
+        shakefile = os.path.join(directory, shakefile)
+        with tf.gfile.GFile(shakefile, 'r') as shaketext:
+            print("Loading file " + shakefile)
+            start = len(codetext)
+            codetext.extend(encode_text(shaketext.read()))
+            end = len(codetext)
+            bookranges.append({"start": start, "end": end, "name": shakefile.rsplit("/", 1)[-1]})
+            print({"start": start, "end": end, "name": shakefile.rsplit("/", 1)[-1]})
 
     if len(bookranges) == 0:
         sys.exit("No training data has been found. Aborting.")
@@ -264,8 +266,13 @@ def read_data_files(directory, validation=True):
     # 10% of the text is how many files ?
     total_len = len(codetext)
     validation_len = 0
+
+    print('total_len {}'.format(total_len))
+
     nb_books1 = 0
     for book in reversed(bookranges):
+        print('validation_len {} nb_books1 {}'.format(validation_len, nb_books1))
+
         validation_len += book["end"]-book["start"]
         nb_books1 += 1
         if validation_len > total_len // 10:
@@ -275,6 +282,8 @@ def read_data_files(directory, validation=True):
     validation_len = 0
     nb_books2 = 0
     for book in reversed(bookranges):
+        print('validation_len {} nb_books2 {}'.format(validation_len, nb_books2))
+
         validation_len += book["end"]-book["start"]
         nb_books2 += 1
         if validation_len > 90*1024:
@@ -283,8 +292,12 @@ def read_data_files(directory, validation=True):
     # 20% of the books is how many books ?
     nb_books3 = len(bookranges) // 5
 
+    print('validation_len {} nb_books3 {}'.format(validation_len, nb_books3))
+
     # pick the smallest
     nb_books = min(nb_books1, nb_books2, nb_books3)
+
+    print('validation_len {} nb_books {}'.format(validation_len, nb_books))
 
     if nb_books == 0 or not validation:
         cutoff = len(codetext)

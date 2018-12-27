@@ -1,3 +1,29 @@
+
+```sh
+ctpu up \
+-preemptible \
+-preemptible-vm
+```
+
+```sh
+capture_tpu_profile --tpu=$TPU_NAME --logdir=gs://mr-lyrics-autocomplete-data/model/tpu_profile/
+tensorboard --logdir=gs://mr-lyrics-autocomplete-data/model/tpu_profile/ &
+```
+
+```sh
+virtualenv --system-site-packages -p python3 .venv
+source .venv/bin/activate  # sh, bash, ksh, or zsh
+
+pip install --upgrade pip
+
+pip list  # show packages installed within the virtual environment
+```
+
+```sh
+deactivate  # don't exit until you're done using TensorFlow
+```
+
+
 # tensorflow-shakespeare-poem-generator
 <img src="https://github.com/koflerm/tensorflow-shakespeare-poem-generator/blob/master/text.png?raw=true"/>
 </br>

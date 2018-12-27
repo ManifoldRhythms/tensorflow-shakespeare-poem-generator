@@ -13,9 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys, os
 import tensorflow as tf
+from tensorflow.contrib import tpu
 import numpy as np
 import my_txtutils
+
+from common import MODEL_CHECKPOINTS_DIR
 
 # these must match what was saved !
 ALPHASIZE = my_txtutils.ALPHASIZE
@@ -43,86 +47,77 @@ pythonA2 = "checkpoints/rnn_train_1495458538-10200000"  # starts looking Tensorf
 pythonB10 = "checkpoints/rnn_train_1495458538-201600000"  # can even recite the Apache license
 
 # use topn=10 for all but the last one which works with topn=2 for Shakespeare and topn=3 for Python
-author = shakespeareB10
+# author = shakespeareB10
+author = 'checkpoints/rnn_train_1545234141-0'
 
 ncnt = 0
-with tf.Session() as sess:
-    new_saver = tf.train.import_meta_graph('checkpoints/rnn_train_1495455686-0.meta')
-    new_saver.restore(sess, author)
-    x = my_txtutils.convert_from_alphabet(ord("L"))
-    x = np.array([[x]])  # shape [BATCHSIZE, SEQLEN] with BATCHSIZE=1 and SEQLEN=1
 
-    # initial values
-    y = x
-    h = np.zeros([1, INTERNALSIZE * NLAYERS], dtype=np.float32)  # [ BATCHSIZE, INTERNALSIZE * NLAYERS]
-    file = open("generated_output.txt", "w")
-    file.write("Hi there, this a generated output poem from the shakespeare machine. have fun! \n\n")
-    for i in range(10000):
-        yo, h = sess.run(['Yo:0', 'H:0'], feed_dict={'X:0': y, 'pkeep:0': 1., 'Hin:0': h, 'batchsize:0': 1})
+tf.logging.set_verbosity(tf.logging.DEBUG)
+tpu_grpc_url = tf.contrib.cluster_resolver.TPUClusterResolver(
+    tpu=[os.environ['TPU_NAME']]).get_master()
 
-        # If sampling is be done from the topn most likely characters, the generated text
-        # is more credible and more "english". If topn is not set, it defaults to the full
-        # distribution (ALPHASIZE)
+def predict(sess, y, h):
+    yo, h = sess.run(['Yo:0', 'H:0'], feed_dict={'X:0': y, 'pkeep:0': 1., 'Hin:0': h, 'batchsize:0': 1})
 
-        # Recommended: topn = 10 for intermediate checkpoints, topn=2 or 3 for fully trained checkpoints
+    # If sampling is be done from the topn most likely characters, the generated text
+    # is more credible and more "english". If topn is not set, it defaults to the full
+    # distribution (ALPHASIZE)
 
-        c = my_txtutils.sample_from_probabilities(yo, topn=2)
-        y = np.array([[c]])  # shape [BATCHSIZE, SEQLEN] with BATCHSIZE=1 and SEQLEN=1
-        c = chr(my_txtutils.convert_to_alphabet(c))
-        print(c, end="")
-        file.write(c)
+    # Recommended: topn = 10 for intermediate checkpoints, topn=2 or 3 for fully trained checkpoints
 
-        if c == '\n':
-            ncnt = 0
-        else:
-            ncnt += 1
-        if ncnt == 100:
-            print("")
-            file.write("")
-            ncnt = 0
-    file.close() 
+    c = my_txtutils.sample_from_probabilities(yo, topn=2)
+    y = np.array([[c]])  # shape [BATCHSIZE, SEQLEN] with BATCHSIZE=1 and SEQLEN=1
+    c = chr(my_txtutils.convert_to_alphabet(c))
 
+    return yo, h, y, c
 
-#        Example output:
-#
-#
-# ACT I
-#
-#
-#
-# SCENE III	An ante-chamber. The COUNT's palace.
-#
-#
-# [Enter CLEOMENES, with the Lord SAY]
-#
-# Chamberlain	Let me see your worshing in my hands.
-#
-# LUCETTA	I am a sign of me, and sorrow sounds it.
-#
-# [Enter CAPULET and LADY MACBETH]
-#
-# What manner of mine is mad, and soon arise?
-#
-# JULIA	What shall by these things were a secret fool,
-# That still shall see me with the best and force?
-#
-# Second Watchman	Ay, but we see them not at home: the strong and fair of thee,
-# The seasons are as safe as the time will be a soul,
-# That works out of this fearful sore of feather
-# To tell her with a storm of something storms
-# That have some men of man is now the subject.
-# What says the story, well say we have said to thee,
-# That shall she not, though that the way of hearts,
-# We have seen his service that we may be sad.
-#
-# [Retains his house]
-# ADRIANA	What says my lord the Duke of Burgons of Tyre?
-#
-# DOMITIUS ENOBARBUS	But, sir, you shall have such a sweet air from the state,
-# There is not so much as you see the store,
-# As if the base should be so foul as you.
-#
-# DOMITIUS ENOY	If I do now, if you were not to seek to say,
-# That you may be a soldier's father for the field.
-#
-# [Exit]
+with tf.Session(tpu_grpc_url) as sess:
+    sess.run(tf.global_variables_initializer())
+    sess.run(tpu.initialize_system())
+
+    # checkpoint_dir = os.path.join(os.getcwd(), 'checkpoints/')
+    checkpoint_dir = MODEL_CHECKPOINTS_DIR
+    new_saver = None
+    str_start = "J"
+    checkpoint = tf.train.get_checkpoint_state(checkpoint_dir)
+
+    if checkpoint and checkpoint.model_checkpoint_path:
+        author = checkpoint.model_checkpoint_path
+        new_saver = tf.train.import_meta_graph('{}.meta'.format(checkpoint.model_checkpoint_path))
+        new_saver.restore(sess, author)
+        print ("Successfully loaded:", checkpoint.model_checkpoint_path)
+
+    if new_saver is None:
+        print('Could not load model checkpoint')
+    else:
+        x = my_txtutils.convert_from_alphabet(ord(str_start))
+        x = np.array([[x]])  # shape [BATCHSIZE, SEQLEN] with BATCHSIZE=1 and SEQLEN=1
+        
+        # x = my_txtutils.encode_text("Jerem")
+        # x = np.array([x])  # shape [BATCHSIZE, SEQLEN] with BATCHSIZE=1 and SEQLEN=1
+
+        # initial values
+        y = x
+        h = np.zeros([1, INTERNALSIZE * NLAYERS], dtype=np.float32)  # [ BATCHSIZE, INTERNALSIZE * NLAYERS]
+
+        file = open("generated_output.txt", "w")
+        print(str_start, end="")
+        file.write(str_start)
+
+        for i in range(100):
+            yo, h, y, c = predict(sess, y, h)
+
+            print(c, end="")
+            file.write(c)
+
+            if c == '\n':
+                ncnt = 0
+            else:
+                ncnt += 1
+            if ncnt == 100:
+                print("")
+                file.write("")
+                ncnt = 0
+        file.close() 
+
+print()
